@@ -66,6 +66,7 @@ jobs:
           echo "AZ_RG=$RG_NAME" >> $GITHUB_ENV
           echo "AZ_BASE=$BASE_NAME" >> $GITHUB_ENV
           echo "AZ_LOCATION=$LOCATION_INPUT" >> $GITHUB_ENV
+          echo "AZ_SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID }}" >> $GITHUB_ENV
 
       - name: Login to Azure
         uses: azure/login@v1
@@ -74,17 +75,22 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           enable-AzPSSession: false
+          allow-no-subscriptions: true
+
+      - name: Validar acceso al resource group
+        run: az group show --name "$AZ_RG" --subscription "$AZ_SUBSCRIPTION_ID"
 
       - name: Ensure Bicep CLI
         run: az bicep install --upgrade
 
       - name: Deploy infrastructure (Bicep)
         run: |
-          az deployment sub create \
+          az deployment group create \
             --name "signalir-${{ github.run_number }}" \
-            --location "$AZ_LOCATION" \
+            --resource-group "$AZ_RG" \
+            --subscription "$AZ_SUBSCRIPTION_ID" \
             --template-file infra/main.bicep \
-            --parameters baseName=$AZ_BASE resourceGroupName=$AZ_RG location=$AZ_LOCATION
+            --parameters baseName=$AZ_BASE location=$AZ_LOCATION
 
       - name: Restore dependencies
         run: dotnet restore DemoApp/DemoApp.sln
