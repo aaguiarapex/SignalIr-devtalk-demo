@@ -1,0 +1,103 @@
+name: Deploy Azure SignalR Demo
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      resource_group:
+        description: 'Nombre del resource group (opcional, usa el secreto por defecto)'
+        required: false
+        type: string
+      base_name:
+        description: 'Prefijo base para los recursos (opcional, usa el secreto por defecto)'
+        required: false
+        type: string
+      location:
+        description: 'Región de Azure'
+        required: false
+        type: choice
+        default: eastus
+        options:
+          - eastus
+          - eastus2
+          - centralus
+          - westus2
+          - westeurope
+          - northeurope
+          - brazilsouth
+          - southeastasia
+
+env:
+  DOTNET_VERSION: '7.0.x'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Preparar variables de despliegue
+        run: |
+          RG_NAME="${{ github.event.inputs.resource_group }}"
+          BASE_NAME="${{ github.event.inputs.base_name }}"
+          LOCATION_INPUT="${{ github.event.inputs.location }}"
+
+          if [ -z "$RG_NAME" ]; then RG_NAME="${{ secrets.AZURE_RG_NAME }}"; fi
+          if [ -z "$BASE_NAME" ]; then BASE_NAME="${{ secrets.AZURE_BASE_NAME }}"; fi
+
+          if [ -z "$LOCATION_INPUT" ]; then 
+            LOCATION_INPUT="${{ secrets.AZURE_LOCATION }}"
+          fi
+
+          echo "AZ_RG=$RG_NAME" >> $GITHUB_ENV
+          echo "AZ_BASE=$BASE_NAME" >> $GITHUB_ENV
+          echo "AZ_LOCATION=$LOCATION_INPUT" >> $GITHUB_ENV
+
+      - name: Login to Azure
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          enable-AzPSSession: false
+
+      - name: Ensure Bicep CLI
+        run: az bicep install --upgrade
+
+      - name: Deploy infrastructure (Bicep)
+        run: |
+          az deployment sub create \
+            --name "signalir-${{ github.run_number }}" \
+            --location "$AZ_LOCATION" \
+            --template-file infra/main.bicep \
+            --parameters baseName=$AZ_BASE resourceGroupName=$AZ_RG location=$AZ_LOCATION
+
+      - name: Restore dependencies
+        run: dotnet restore DemoApp/DemoApp.sln
+
+      - name: Publish application
+        run: dotnet publish DemoApp/DemoApp.csproj -c Release -o publish
+
+      - name: Archive package
+        run: |
+          cd publish
+          zip -r ../demoapp.zip .
+
+      - name: Deploy Web App
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ format('{0}-web', env.AZ_BASE) }}
+          package: demoapp.zip
+
+      - name: Logout from Azure
+        if: always()
+        run: az logout

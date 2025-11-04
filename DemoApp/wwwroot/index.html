@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SignalIR Demo Chat</title>
+    <link rel="stylesheet" href="css/site.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/7.0.14/signalr.min.js" integrity="sha512-JQV1iSCSchqE0pIYWOYYRt8nPsAhh9jKOIYYSt9LV+jmkmqx7jVim+Ha/Hb+VVeQVeFNHM+J8HChUdOAZrFUyQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  </head>
+  <body>
+    <main class="chat-shell">
+      <header>
+        <h1>SignalIR Demo Chat</h1>
+        <p>Conéctate con un alias, elige una sala y demuestra la experiencia en segundos.</p>
+        <p class="status"><span class="status-label">Estado</span><span id="status" class="status-badge" data-tone="idle">Sin conexión</span></p>
+        <p class="room-info">Sala actual · <span id="roomTag">—</span></p>
+      </header>
+
+      <section id="login" class="panel" aria-label="Configurar sesión de chat">
+        <label class="field">
+          <span>Nombre de usuario</span>
+          <input id="username" type="text" maxlength="32" autocomplete="off" placeholder="Ej. ada-lovelace" />
+        </label>
+
+        <div class="field" aria-label="Selecciona una sala">
+          <span>Sala de chat</span>
+          <div class="room-chips" data-room-context="login">
+            <button type="button" class="chip" data-room-context="login" data-room-key="dotnet" data-room-label="#.NET">#.NET</button>
+            <button type="button" class="chip" data-room-context="login" data-room-key="java" data-room-label="#Java">#Java</button>
+            <button type="button" class="chip" data-room-context="login" data-room-key="full-stack-html" data-room-label="#Full Stack HTML">#Full Stack HTML</button>
+          </div>
+        </div>
+
+        <button id="join" class="primary" type="button">Entrar al chat</button>
+        <p id="loginError" class="error" aria-live="polite"></p>
+      </section>
+
+      <section id="chat" class="panel hidden" aria-label="Conversación en tiempo real">
+        <div class="chat-toolbar" aria-label="Cambiar sala">
+          <div class="room-chips" data-room-context="chat">
+            <button type="button" class="chip" data-room-context="chat" data-room-key="dotnet" data-room-label="#.NET">#.NET</button>
+            <button type="button" class="chip" data-room-context="chat" data-room-key="java" data-room-label="#Java">#Java</button>
+            <button type="button" class="chip" data-room-context="chat" data-room-key="full-stack-html" data-room-label="#Full Stack HTML">#Full Stack HTML</button>
+          </div>
+          <span class="toolbar-hint">Cambia de sala sin salir</span>
+        </div>
+
+        <div id="messages" class="messages" role="log" aria-live="polite"></div>
+        <form id="sendForm" class="send" autocomplete="off">
+          <input id="messageInput" type="text" placeholder="Escribe un mensaje" maxlength="300" />
+          <button id="sendButton" class="primary" type="submit">Enviar</button>
+        </form>
+      </section>
+    </main>
+
+    <template id="messageTemplate">
+      <article class="message">
+        <span class="meta"></span>
+        <p class="body"></p>
+      </article>
+    </template>
+
+    <div id="toast" class="toast hidden" role="status" aria-live="assertive"></div>
+
+    <script>
+      (function () {
+        if (!window.signalR) {
+          console.error('Librería SignalR no disponible');
+          document.body.innerHTML = '<main class="chat-shell"><h1>Error de carga</h1><p>No se pudo cargar SignalR. Revisa la conexión a CDNs.</p></main>' + document.body.innerHTML;
+          return;
+        }
+
+        const loginSection = document.getElementById('login');
+        const chatSection = document.getElementById('chat');
+        const usernameInput = document.getElementById('username');
+        const loginButton = document.getElementById('join');
+        const loginError = document.getElementById('loginError');
+        const sendForm = document.getElementById('sendForm');
+        const messageInput = document.getElementById('messageInput');
+        const sendButton = document.getElementById('sendButton');
+        const messagesContainer = document.getElementById('messages');
+        const messageTemplate = document.getElementById('messageTemplate');
+        const statusBadge = document.getElementById('status');
+        const roomTag = document.getElementById('roomTag');
+        const toast = document.getElementById('toast');
+        const roomChips = Array.from(document.querySelectorAll('[data-room-key]'));
+        if (roomChips.length === 0) {
+          console.error('No hay salas configuradas en la interfaz');
+          return;
+        }
+        const loginRoomChips = roomChips.filter((chip) => chip.dataset.roomContext === 'login');
+        const chatRoomChips = roomChips.filter((chip) => chip.dataset.roomContext === 'chat');
+
+        let selectedRoom = (loginRoomChips[0] ?? chatRoomChips[0])?.dataset.roomKey ?? 'dotnet';
+        let selectedRoomLabel = (loginRoomChips[0] ?? chatRoomChips[0])?.dataset.roomLabel ?? '#.NET';
+        let connection;
+        let username = '';
+        let currentRoom = '';
+        let connectionStarted = false;
+        let toastTimer;
+
+        messageInput.disabled = true;
+        sendButton.disabled = true;
+        setChipCollectionDisabled(chatRoomChips, true);
+        applyRoomSelection(getChipForRoom(selectedRoom) ?? roomChips[0]);
+
+        roomChips.forEach((chip) => {
+          chip.addEventListener('click', () => {
+            if (chip.hasAttribute('disabled')) {
+              return;
+            }
+
+            const targetKey = chip.dataset.roomKey ?? 'dotnet';
+            const targetLabel = chip.dataset.roomLabel ?? '#.NET';
+
+            if (connectionStarted && targetKey === currentRoom) {
+              applyRoomSelection(chip);
+              setStatus(`En ${targetLabel}`, 'success');
+              return;
+            }
+
+            const fallbackKey = selectedRoom;
+            const fallbackLabel = selectedRoomLabel;
+
+            applyRoomSelection(chip);
+            selectedRoom = targetKey;
+            selectedRoomLabel = targetLabel;
+
+            if (!connectionStarted) {
+              showError('');
+              return;
+            }
+
+            if (targetKey === currentRoom) {
+              setStatus(`En ${targetLabel}`, 'success');
+              return;
+            }
+
+            changeRoom(targetKey, targetLabel, fallbackKey, fallbackLabel);
+          });
+        });
+
+        function getChipForRoom(roomKey) {
+          return roomChips.find((chip) => chip.dataset.roomKey === roomKey) ?? null;
+        }
+
+        function setChipCollectionDisabled(collection, disabled) {
+          collection.forEach((chip) => chip.toggleAttribute('disabled', disabled));
+        }
+
+        function applyRoomSelection(chip) {
+          roomChips.forEach((c) => {
+            c.classList.remove('selected');
+            c.setAttribute('aria-pressed', 'false');
+          });
+
+          if (!chip) {
+            return;
+          }
+
+          chip.classList.add('selected');
+          chip.setAttribute('aria-pressed', 'true');
+          selectedRoom = chip.dataset.roomKey ?? selectedRoom;
+          selectedRoomLabel = chip.dataset.roomLabel ?? selectedRoomLabel;
+        }
+
+        function setStatus(text, tone = 'info') {
+          if (!statusBadge) {
+            return;
+          }
+          statusBadge.textContent = text;
+          statusBadge.dataset.tone = tone;
+        }
+
+        function showToast(message, tone = 'info') {
+          if (!toast) {
+            return;
+          }
+
+          clearTimeout(toastTimer);
+          toast.textContent = message;
+          toast.dataset.tone = tone;
+          toast.classList.remove('hidden');
+          toast.classList.add('visible');
+
+          toastTimer = setTimeout(() => {
+            toast.classList.remove('visible');
+            toastTimer = setTimeout(() => {
+              toast.classList.add('hidden');
+            }, 240);
+          }, 4200);
+        }
+
+        function setRoomTag(label) {
+          if (!roomTag) {
+            return;
+          }
+          roomTag.textContent = label && label.trim() ? label : '—';
+        }
+
+        function toggleLoginControls(disabled) {
+          usernameInput.toggleAttribute('disabled', disabled);
+          loginButton.toggleAttribute('disabled', disabled);
+          setChipCollectionDisabled(loginRoomChips, disabled);
+        }
+
+        setRoomTag('');
+
+        function toggleChatControls(enabled) {
+          messageInput.toggleAttribute('disabled', !enabled);
+          sendButton.toggleAttribute('disabled', !enabled);
+          setChipCollectionDisabled(chatRoomChips, !enabled);
+        }
+
+        function renderMessage(user, message, timestamp) {
+          const template = messageTemplate.content.cloneNode(true);
+          const article = template.querySelector('.message');
+          const meta = template.querySelector('.meta');
+          const body = template.querySelector('.body');
+          const isSystem = user === 'sistema';
+          const isSelf = !isSystem && user === username;
+          const time = new Date(timestamp).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
+
+          article.classList.toggle('system', isSystem);
+          article.classList.toggle('self', isSelf);
+          article.classList.toggle('peer', !isSystem && !isSelf);
+
+          meta.textContent = isSystem ? time : isSelf ? `Tú · ${time}` : `${user} · ${time}`;
+          body.textContent = message;
+
+          messagesContainer.appendChild(template);
+          messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+
+        function renderSystem(message, timestamp) {
+          const eventTime = timestamp ?? new Date().toISOString();
+          renderMessage('sistema', message, eventTime);
+        }
+
+        function showError(message) {
+          loginError.textContent = message;
+        }
+
+        async function startConnection() {
+          if (connectionStarted) {
+            return;
+          }
+
+          setStatus('Conectando…', 'info');
+          showToast('Conectando con SignalR…', 'info');
+
+          connection = new signalR.HubConnectionBuilder().withUrl('/chat').withAutomaticReconnect().build();
+
+          connection.on('ReceiveMessage', (user, message, timestamp) => {
+            renderMessage(user, message, timestamp);
+          });
+
+          connection.on('JoinedRoom', (roomKey, roomLabel, alias, joinedAt) => {
+            const previousRoom = currentRoom;
+            currentRoom = roomKey;
+            username = alias;
+            setRoomTag(roomLabel);
+            const matchingChip = getChipForRoom(roomKey);
+            applyRoomSelection(matchingChip ?? roomChips[0]);
+            if (previousRoom !== roomKey) {
+              messagesContainer.innerHTML = '';
+            }
+            toggleChatControls(true);
+            setChipCollectionDisabled(loginRoomChips, true);
+            loginSection.classList.add('hidden');
+            chatSection.classList.remove('hidden');
+            setStatus(`En ${roomLabel}`, 'success');
+            loginError.textContent = '';
+            messageInput.focus();
+            renderSystem(`Te uniste a ${roomLabel}`, joinedAt);
+            showToast(`Estás en ${roomLabel}`, 'success');
+          });
+
+          connection.onreconnecting(() => {
+            renderSystem('Reconectando…');
+            setStatus('Reconectando…', 'warning');
+            showToast('Perdimos la conexión, intentando reconectar…', 'warning');
+            toggleChatControls(false);
+          });
+
+          connection.onreconnected(async () => {
+            renderSystem('Conexión restablecida');
+            setStatus('Restaurando sala…', 'info');
+            showToast('Conexión restablecida, restaurando sala…', 'info');
+            toggleChatControls(false);
+            if (username && currentRoom) {
+              try {
+                await connection.invoke('JoinRoom', currentRoom, username);
+              } catch (err) {
+                console.error('No se pudo reanudar la sala', err);
+                setStatus('Sin conexión', 'error');
+                showToast('No se pudo restaurar la sala automáticamente.', 'error');
+                renderSystem('No se pudo reanudar la sala automáticamente. Ingresa de nuevo.');
+                toggleLoginControls(false);
+              }
+            } else {
+              setStatus('Conectado', 'success');
+              toggleChatControls(true);
+            }
+          });
+
+          connection.onclose(() => {
+            connectionStarted = false;
+            setStatus('Sin conexión', 'error');
+            showToast('La conexión con SignalR se cerró.', 'error');
+            toggleChatControls(false);
+            toggleLoginControls(false);
+            chatSection.classList.add('hidden');
+            loginSection.classList.remove('hidden');
+            setRoomTag('');
+            messagesContainer.innerHTML = '';
+            showError('La conexión se cerró. Ingresa nuevamente para continuar.');
+            messageInput.value = '';
+            username = '';
+            currentRoom = '';
+            const initialChip = getChipForRoom('dotnet') ?? roomChips[0];
+            applyRoomSelection(initialChip);
+            selectedRoom = initialChip?.dataset.roomKey ?? 'dotnet';
+            selectedRoomLabel = initialChip?.dataset.roomLabel ?? '#.NET';
+            usernameInput.focus();
+          });
+
+          try {
+            await connection.start();
+            connectionStarted = true;
+          } catch (err) {
+            console.error('Error al iniciar SignalR', err);
+            setStatus('Sin conexión', 'error');
+            showError('No fue posible conectarse. Reintenta en unos segundos.');
+            showToast('No fue posible conectarse a SignalR.', 'error');
+            throw err;
+          }
+        }
+
+        async function changeRoom(targetKey, targetLabel, fallbackKey, fallbackLabel) {
+          if (!connectionStarted || !connection) {
+            return;
+          }
+
+          toggleChatControls(false);
+          setStatus(`Cambiando a ${targetLabel}`, 'info');
+          showToast(`Cambiando a ${targetLabel}…`, 'info');
+
+          try {
+            await connection.invoke('JoinRoom', targetKey, username);
+          } catch (err) {
+            console.error('No se pudo cambiar de sala', err);
+            showToast('No se pudo cambiar de sala. Intenta más tarde.', 'error');
+            setStatus(`En ${fallbackLabel}`, 'warning');
+            const fallbackChip = getChipForRoom(fallbackKey) ?? roomChips[0];
+            applyRoomSelection(fallbackChip);
+            selectedRoom = fallbackKey;
+            selectedRoomLabel = fallbackLabel;
+            toggleChatControls(true);
+          }
+        }
+
+        loginButton.addEventListener('click', async () => {
+          const alias = usernameInput.value.trim();
+
+          if (!alias) {
+            showError('El nombre es obligatorio.');
+            usernameInput.focus();
+            return;
+          }
+
+          if (!selectedRoom) {
+            showError('Selecciona una sala.');
+            return;
+          }
+
+          username = alias;
+          const desiredRoom = selectedRoom;
+          toggleLoginControls(true);
+          toggleChatControls(false);
+          showError('');
+          setStatus(`Conectando a ${selectedRoomLabel}`, 'info');
+          showToast(`Preparando sala ${selectedRoomLabel}…`, 'info');
+
+          try {
+            await startConnection();
+          } catch (err) {
+            toggleLoginControls(false);
+            return;
+          }
+
+          if (!connectionStarted) {
+            toggleLoginControls(false);
+            return;
+          }
+
+          try {
+            await connection.invoke('JoinRoom', desiredRoom, username);
+          } catch (err) {
+            console.error('No se pudo unir a la sala', err);
+            showError('No se pudo unir a la sala. Intenta con otro nombre o sala.');
+            showToast('No se pudo unir a la sala seleccionada.', 'error');
+            setStatus('Sin conexión', 'error');
+            toggleLoginControls(false);
+            return;
+          }
+        });
+
+        sendForm.addEventListener('submit', async (event) => {
+          event.preventDefault();
+          const message = messageInput.value.trim();
+          if (!message || !connectionStarted || !currentRoom) {
+            return;
+          }
+
+          try {
+            await connection.invoke('SendMessage', currentRoom, username, message);
+            messageInput.value = '';
+            messageInput.focus();
+          } catch (err) {
+            console.error('No se pudo enviar el mensaje', err);
+            renderSystem('No se pudo enviar el mensaje. Intenta nuevamente.');
+            setStatus(`En ${roomTag.textContent}`, 'warning');
+            showToast('No se pudo enviar el mensaje.', 'error');
+          }
+        });
+      })();
+    </script></script>
+  </body>
+</html>
