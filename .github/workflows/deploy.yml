@@ -29,7 +29,12 @@ on:
           - brazilsouth
           - southeastasia
 
+permissions:
+  id-token: write
+  contents: read
+
 env:
+
   DOTNET_VERSION: '7.0.x'
 
 jobs:
