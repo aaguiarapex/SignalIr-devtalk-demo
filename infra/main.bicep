@@ -1,10 +1,7 @@
-targetScope = 'subscription'
-
-@description('Resource group name to create (lowercase letters, numbers, and hyphens).')
-param resourceGroupName string
+targetScope = 'resourceGroup'
 
 @description('Azure region for the resource group and all resources.')
-param location string
+param location string = resourceGroup().location
 
 @description('Base name prefix for all Azure resources. Use lowercase letters and numbers.')
 param baseName string
@@ -15,14 +12,8 @@ param appServiceSkuName string = 'B1'
 @description('App Service plan tier (e.g., Free, Basic, Standard).')
 param appServiceSkuTier string = 'Basic'
 
-resource appRg 'Microsoft.Resources/resourceGroups@2021-04-01' = {
-  name: resourceGroupName
-  location: location
-}
-
 module app 'app.bicep' = {
   name: '${baseName}-app'
-  scope: resourceGroup(appRg.name)
   params: {
     baseName: baseName
     location: location
@@ -31,7 +22,7 @@ module app 'app.bicep' = {
   }
 }
 
-output resourceGroup string = appRg.name
+output resourceGroup string = resourceGroup().name
 output webAppName string = app.outputs.webAppName
 output webAppDefaultHostName string = app.outputs.webAppDefaultHostName
 output signalRConnectionString string = app.outputs.signalRConnectionString
