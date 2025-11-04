@@ -71,7 +71,7 @@ jobs:
           enable-AzPSSession: false
 
       - name: Ensure Bicep CLI
-        run: az bicep install --upgrade
+        run: az bicep install
 
       - name: Deploy infrastructure (Bicep)
         run: |
