@@ -50,6 +50,11 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
+      - name: Install Azure CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y azure-cli
+
       - name: Preparar variables de despliegue
         run: |
           RG_NAME="${{ github.event.inputs.resource_group }}"
